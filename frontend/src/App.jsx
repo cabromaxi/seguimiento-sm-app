@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
+const SUPABASE_URL = 'https://iqnvhwlfrpmgjjggfevl.supabase.co';
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const API_BASE = SUPABASE_URL ? `${SUPABASE_URL}/rest/v1` : '';
 const LS_CASES = 'sm_cases_offline_v2';
