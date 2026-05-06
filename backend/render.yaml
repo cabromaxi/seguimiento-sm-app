@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: seguimiento-sm-api
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: seguimiento-sm-db
+          property: connectionString
+
+databases:
+  - name: seguimiento-sm-db
+    databaseName: seguimiento_sm
+    user: seguimiento_sm_user
