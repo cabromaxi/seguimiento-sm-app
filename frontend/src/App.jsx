@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 const SUPABASE_URL = 'https://iqnvhwlfrpmgjjggfevl.supabase.co';
-const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-const API_BASE = SUPABASE_URL ? `${SUPABASE_URL}/rest/v1` : '';
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_KEY || '';
+const API_BASE = `${SUPABASE_URL}/rest/v1`;
 const LS_CASES = 'sm_cases_offline_v2';
 const LS_QUEUE = 'sm_sync_queue_v2';
 const LS_SELECTED = 'sm_selected_case_v2';
@@ -446,7 +446,7 @@ async function addEvent() {
             <div className="small muted">Estado</div>
             <div className="top-row"><span>{online ? 'Online' : 'Offline'}</span><span className="badge">{pendingCount} pendiente(s)</span></div>
             <button className="secondary" onClick={syncNow}>Sincronizar ahora</button>
-            <div className="small muted">Supabase: {SUPABASE_URL || 'sin configurar'}</div>
+            <div className="small muted">Supabase directo: {SUPABASE_URL}</div>
           </div>
         </aside>
 
