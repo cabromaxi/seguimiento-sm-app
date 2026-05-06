@@ -1,9 +1,140 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:5000/api`;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const API_BASE = SUPABASE_URL ? `${SUPABASE_URL}/rest/v1` : '';
 const LS_CASES = 'sm_cases_offline_v2';
 const LS_QUEUE = 'sm_sync_queue_v2';
 const LS_SELECTED = 'sm_selected_case_v2';
+
+function supabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+}
+
+async function sbFetch(path, options = {}) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Faltan variables de Supabase');
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: supabaseHeaders(options.headers || {}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function cleanUndefined(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined));
+}
+
+function usuarioPayload(data) {
+  return cleanUndefined({
+    client_id: data.client_id,
+    nombre: data.nombre,
+    rut: data.rut,
+    nacimiento: data.nacimiento,
+    direccion: data.direccion,
+    comuna: data.comuna,
+    telefono: data.telefono,
+    establecimiento: data.establecimiento,
+    diagnostico: data.diagnostico,
+    estado: data.estado || 'Activo',
+    observaciones: data.observaciones,
+    lat: data.lat,
+    lng: data.lng,
+    created_at: data.created_at,
+    updated_at: data.updated_at || new Date().toISOString(),
+    deleted_at: data.deleted_at || null,
+  });
+}
+
+function familiaPayload(data) {
+  return cleanUndefined({
+    client_id: data.client_id,
+    usuario_client_id: data.usuario_client_id,
+    nombre: data.nombre,
+    parentesco: data.parentesco,
+    edad: data.edad,
+    convive: data.convive,
+    telefono: data.telefono,
+    observaciones: data.observaciones,
+    created_at: data.created_at,
+    updated_at: data.updated_at || new Date().toISOString(),
+    deleted_at: data.deleted_at || null,
+  });
+}
+
+function eventoPayload(data) {
+  const metadata = data.metadata || data.metadata_json || {};
+  return cleanUndefined({
+    client_id: data.client_id,
+    usuario_client_id: data.usuario_client_id,
+    categoria: data.categoria,
+    tipo: data.tipo,
+    fecha: data.fecha,
+    titulo: data.titulo,
+    detalle: data.detalle,
+    lugar: data.lugar,
+    metadata_json: metadata,
+    metadata,
+    created_at: data.created_at,
+    updated_at: data.updated_at || new Date().toISOString(),
+    deleted_at: data.deleted_at || null,
+  });
+}
+
+async function insertRow(table, payload) {
+  const rows = await sbFetch(`/${table}`, {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(payload),
+  });
+  return rows?.[0] || payload;
+}
+
+async function patchByClientId(table, clientId, payload) {
+  const rows = await sbFetch(`/${table}?client_id=eq.${encodeURIComponent(clientId)}`, {
+    method: 'PATCH',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(payload),
+  });
+  return rows?.[0] || payload;
+}
+
+async function saveRemote(entity, data) {
+  if (entity === 'usuario') {
+    const payload = usuarioPayload(data);
+    return data.id ? patchByClientId('usuarios', data.client_id, payload) : insertRow('usuarios', payload);
+  }
+  if (entity === 'familia') {
+    const payload = familiaPayload(data);
+    return data.id ? patchByClientId('familia', data.client_id, payload) : insertRow('familia', payload);
+  }
+  if (entity === 'evento') {
+    const payload = eventoPayload(data);
+    return data.id ? patchByClientId('eventos', data.client_id, payload) : insertRow('eventos', payload);
+  }
+  throw new Error(`Entidad no soportada: ${entity}`);
+}
+
+async function loadFromSupabase() {
+  const [usuarios, familia, eventos] = await Promise.all([
+    sbFetch('/usuarios?deleted_at=is.null&order=updated_at.desc'),
+    sbFetch('/familia?deleted_at=is.null&order=id.asc'),
+    sbFetch('/eventos?deleted_at=is.null&order=fecha.desc'),
+  ]);
+  return (usuarios || []).map((usuario) => ({
+    ...usuario,
+    familia: (familia || []).filter((f) => f.usuario_client_id === usuario.client_id),
+    eventos: (eventos || [])
+      .filter((e) => e.usuario_client_id === usuario.client_id)
+      .map((e) => ({ ...e, metadata: e.metadata_json || e.metadata || {} })),
+  }));
+}
 
 const moduleStyles = {
   visitas: { bg: '#ecfdf5', text: '#047857', fill: '#10b981', accent: '#d1fae5', label: 'Visitas domiciliarias' },
@@ -34,12 +165,6 @@ function safeRead(key, fallback) {
   } catch {
     return fallback;
   }
-}
-
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options });
-  if (!res.ok) throw new Error(await res.text());
-  return res.status === 204 ? null : res.json();
 }
 
 function getMonthMatrix(year, month) {
@@ -128,14 +253,16 @@ function App() {
   useEffect(() => {
     async function load() {
       try {
-        const data = await fetchJson(`${API_BASE}/bootstrap`);
+        const usuarios = await loadFromSupabase();
         setOnline(true);
-        if ((cases.length === 0 || queue.length === 0) && (data.usuarios || []).length > 0) {
-          setCases(data.usuarios);
-          if (!selectedId) setSelectedId(data.usuarios[0].client_id);
+        if (usuarios.length > 0) {
+          setCases(usuarios);
+          if (!selectedId) setSelectedId(usuarios[0].client_id);
+          setSyncMessage('Datos cargados desde Supabase.');
         }
-      } catch {
+      } catch (error) {
         setOnline(false);
+        setSyncMessage('No se pudo conectar a Supabase. Se muestran datos locales si existen.');
       }
     }
     load();
@@ -149,48 +276,76 @@ function App() {
   const pendingCount = queue.filter((q) => q.status === 'pending').length;
 
   async function syncNow() {
-    if (pendingCount === 0) { setSyncMessage('No hay cambios pendientes.'); return; }
     try {
       const pending = queue.filter((q) => q.status === 'pending');
-      const resp = await fetchJson(`${API_BASE}/sync`, { method: 'POST', body: JSON.stringify({ operations: pending }) });
-      const okIds = new Set((resp.results || []).map((r) => r.op_id));
-      setQueue((prev) => prev.map((op) => okIds.has(op.op_id) ? { ...op, status: 'synced' } : op));
+      let ok = 0;
+      for (const op of pending) {
+        await saveRemote(op.entity, op.data);
+        ok += 1;
+      }
+      const usuarios = await loadFromSupabase();
+      if (usuarios.length > 0) setCases(usuarios);
+      setQueue((prev) => prev.map((op) => op.status === 'pending' ? { ...op, status: 'synced' } : op));
       setOnline(true);
-      setSyncMessage(`Sincronización completada. ${okIds.size} cambio(s) enviados.`);
+      setSyncMessage(ok > 0 ? `Sincronización completada. ${ok} cambio(s) enviados.` : 'No había cambios pendientes. Datos actualizados desde Supabase.');
     } catch (error) {
       setOnline(false);
       setSyncMessage('No se pudo sincronizar. Los cambios siguen guardados localmente.');
     }
   }
 
-  function saveCase() {
+  async function saveCase() {
     if (!caseForm.nombre.trim()) return;
-    const data = { ...caseForm, client_id: uid(), familia: [], eventos: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-    setCases((prev) => [data, ...prev]);
-    setQueue((prev) => enqueue(prev, 'usuario', data));
-    setSelectedId(data.client_id);
+    const localData = { ...caseForm, client_id: uid(), familia: [], eventos: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    setCases((prev) => [localData, ...prev]);
+    setSelectedId(localData.client_id);
     setShowNew(false);
     setView('usuarios');
     setCaseForm({ nombre:'', rut:'', nacimiento:'', direccion:'', comuna:'', telefono:'', establecimiento:'', diagnostico:'', estado:'Activo', observaciones:'', lat:'', lng:'' });
-    setSyncMessage('Caso guardado en la tablet. Pendiente de sincronización.');
+    try {
+      const saved = await saveRemote('usuario', localData);
+      const finalData = { ...localData, ...saved };
+      setCases((prev) => prev.map((c) => c.client_id === localData.client_id ? { ...finalData, familia: [], eventos: [] } : c));
+      setOnline(true);
+      setSyncMessage('Caso guardado online en Supabase.');
+    } catch {
+      setQueue((prev) => enqueue(prev, 'usuario', localData));
+      setOnline(false);
+      setSyncMessage('Caso guardado localmente. Pendiente de sincronización.');
+    }
   }
 
-  function updateSelectedCase(patch) {
+  async function updateSelectedCase(patch) {
     if (!selectedCase) return;
     const updated = { ...selectedCase, ...patch, updated_at: new Date().toISOString() };
     setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? updated : c));
-    setQueue((prev) => enqueue(prev, 'usuario', updated));
-    setSyncMessage('Ficha guardada localmente.');
+    try {
+      await saveRemote('usuario', updated);
+      setOnline(true);
+      setSyncMessage('Ficha actualizada online.');
+    } catch {
+      setQueue((prev) => enqueue(prev, 'usuario', updated));
+      setOnline(false);
+      setSyncMessage('Ficha guardada localmente. Pendiente de sincronización.');
+    }
   }
 
-  function addFamily() {
+  async function addFamily() {
     if (!selectedCase || !familyForm.nombre.trim()) return;
     const item = { ...familyForm, client_id: uid(), usuario_client_id: selectedCase.client_id, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     const updated = { ...selectedCase, familia: [...(selectedCase.familia || []), item] };
     setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? updated : c));
-    setQueue((prev) => enqueue(prev, 'familia', item));
     setFamilyForm({ nombre:'', parentesco:'', edad:'', convive:'Sí', telefono:'', observaciones:'' });
-    setSyncMessage('Integrante familiar guardado localmente.');
+    try {
+      const saved = await saveRemote('familia', item);
+      setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? { ...c, familia: (c.familia || []).map((f) => f.client_id === item.client_id ? { ...item, ...saved } : f) } : c));
+      setOnline(true);
+      setSyncMessage('Integrante familiar guardado online.');
+    } catch {
+      setQueue((prev) => enqueue(prev, 'familia', item));
+      setOnline(false);
+      setSyncMessage('Integrante familiar guardado localmente. Pendiente de sincronización.');
+    }
   }
 
   function startEditEvent(ev) {
@@ -223,7 +378,8 @@ function App() {
   }
 
 
-function addEvent() {
+
+async function addEvent() {
   if (!selectedCase || !eventForm.titulo.trim()) return;
   const metadata = {};
   let detail = eventForm.detalle || '';
@@ -254,9 +410,18 @@ function addEvent() {
     : [item, ...(selectedCase.eventos || [])];
   const updated = { ...selectedCase, eventos: updatedEvents };
   setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? updated : c));
-  setQueue((prev) => enqueue(prev, 'evento', item));
+  try {
+    const current = selectedCase.eventos.find((e) => e.client_id === item.client_id);
+    const saved = await saveRemote('evento', { ...item, id: current?.id });
+    setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? { ...c, eventos: (c.eventos || []).map((e) => e.client_id === item.client_id ? { ...item, ...saved, metadata: saved.metadata_json || saved.metadata || item.metadata } : e) } : c));
+    setOnline(true);
+    setSyncMessage(editingEventId ? 'Registro actualizado online.' : 'Registro guardado online.');
+  } catch {
+    setQueue((prev) => enqueue(prev, 'evento', item));
+    setOnline(false);
+    setSyncMessage(editingEventId ? 'Registro actualizado localmente. Pendiente de sincronización.' : 'Registro guardado localmente. Pendiente de sincronización.');
+  }
   cancelEditEvent();
-  setSyncMessage(editingEventId ? 'Registro actualizado localmente.' : 'Registro guardado localmente.');
 }
 
   const caseCalendar = useMemo(() => {
@@ -281,7 +446,7 @@ function addEvent() {
             <div className="small muted">Estado</div>
             <div className="top-row"><span>{online ? 'Online' : 'Offline'}</span><span className="badge">{pendingCount} pendiente(s)</span></div>
             <button className="secondary" onClick={syncNow}>Sincronizar ahora</button>
-            <div className="small muted">Servidor API: {API_BASE}</div>
+            <div className="small muted">Supabase: {SUPABASE_URL || 'sin configurar'}</div>
           </div>
         </aside>
 
