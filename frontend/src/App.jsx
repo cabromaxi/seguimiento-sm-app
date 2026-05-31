@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 const SUPABASE_URL = 'https://iqnvhwlfrpmgijggfevl.supabase.co';
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -245,6 +245,17 @@ function App() {
   const [familyForm, setFamilyForm] = useState({ nombre:'', parentesco:'', edad:'', convive:'Sí', telefono:'', observaciones:'' });
   const [eventForm, setEventForm] = useState({ fecha: nowDate(), titulo:'', detalle:'', lugar:'', acompanante:'', tipoVisita:'Realizada', motivo:'', recintoInterno:'', encargadoPaciente:'', encargadoContacto:'', fechaIngreso: nowDate(), horaIngreso:'', fechaSalida: nowDate(), horaSalida:'' });
   const [editingEventId, setEditingEventId] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState('');
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [meetingTitle, setMeetingTitle] = useState('Registro de conversación');
+  const [meetingParticipants, setMeetingParticipants] = useState('Profesional, usuario/familia, red interviniente');
+  const [audioUrl, setAudioUrl] = useState('');
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recognitionRef = useRef(null);
 
   useEffect(() => { localStorage.setItem(LS_CASES, JSON.stringify(cases)); }, [cases]);
   useEffect(() => { localStorage.setItem(LS_QUEUE, JSON.stringify(queue)); }, [queue]);
@@ -424,6 +435,125 @@ async function addEvent() {
   cancelEditEvent();
 }
 
+
+  async function startMeetingRecording() {
+    if (!selectedCase) {
+      setSyncMessage('Selecciona un caso antes de grabar una reunión.');
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setRecordingStatus('Este navegador no permite grabación de audio.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+        setAudioUrl(URL.createObjectURL(blob));
+      };
+      recorder.start();
+
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'es-CL';
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.onresult = (event) => {
+          let finalText = '';
+          let interimText = '';
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            const text = event.results[i][0].transcript;
+            if (event.results[i].isFinal) finalText += `${text.trim()}\n`;
+            else interimText += text;
+          }
+          if (finalText) setLiveTranscript((prev) => `${prev}${finalText}`);
+          setInterimTranscript(interimText);
+        };
+        recognition.onerror = () => setRecordingStatus('Grabando audio. La transcripción automática se interrumpió, pero el audio continúa.');
+        recognition.onend = () => {
+          if (mediaRecorderRef.current?.state === 'recording') {
+            try { recognition.start(); } catch { /* navegador impide reinicio inmediato */ }
+          }
+        };
+        recognitionRef.current = recognition;
+        recognition.start();
+        setRecordingStatus('Grabando audio y transcribiendo en vivo.');
+      } else {
+        setRecordingStatus('Grabando audio. Este navegador no soporta transcripción automática en vivo.');
+      }
+      setIsRecording(true);
+    } catch (error) {
+      setRecordingStatus('No se pudo acceder al micrófono. Revisa permisos del navegador/tablet.');
+    }
+  }
+
+  function stopMeetingRecording() {
+    try { recognitionRef.current?.stop(); } catch { /* noop */ }
+    try {
+      if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+      mediaStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+    } catch { /* noop */ }
+    setIsRecording(false);
+    setInterimTranscript('');
+    setRecordingStatus('Grabación detenida. Puedes revisar, copiar, descargar audio o guardar como acción del caso.');
+  }
+
+  async function saveTranscriptAsEvent() {
+    if (!selectedCase || !liveTranscript.trim()) {
+      setSyncMessage('No hay transcripción para guardar.');
+      return;
+    }
+    const detail = [
+      `Participantes declarados: ${meetingParticipants || '-'}`,
+      'Transcripción automática:',
+      liveTranscript.trim(),
+      'Nota: la separación por participante debe revisarse manualmente si el navegador no identificó voces.'
+    ].join('\n\n');
+    const item = {
+      client_id: uid(),
+      usuario_client_id: selectedCase.client_id,
+      categoria: 'reuniones_ampliadas',
+      tipo: 'Reunión / conversación grabada',
+      fecha: nowDate(),
+      titulo: meetingTitle || 'Registro de conversación',
+      detalle: detail,
+      lugar: eventForm.lugar || '',
+      metadata: { fuente: 'grabacion_transcripcion_web', participantes: meetingParticipants, tieneAudioLocal: Boolean(audioUrl) },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    const updated = { ...selectedCase, eventos: [item, ...(selectedCase.eventos || [])] };
+    setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? updated : c));
+    try {
+      const saved = await saveRemote('evento', item);
+      setCases((prev) => prev.map((c) => c.client_id === selectedCase.client_id ? { ...c, eventos: (c.eventos || []).map((e) => e.client_id === item.client_id ? { ...item, ...saved, metadata: saved.metadata_json || saved.metadata || item.metadata } : e) } : c));
+      setOnline(true);
+      setSyncMessage('Transcripción guardada online como acción del caso.');
+    } catch {
+      setQueue((prev) => enqueue(prev, 'evento', item));
+      setOnline(false);
+      setSyncMessage('Transcripción guardada localmente. Pendiente de sincronización.');
+    }
+    setTab('timeline');
+  }
+
+  function clearTranscript() {
+    setLiveTranscript('');
+    setInterimTranscript('');
+    setRecordingStatus('Transcripción limpiada.');
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    setAudioUrl('');
+  }
+
   const caseCalendar = useMemo(() => {
     const year = new Date().getFullYear();
     const month = new Date().getMonth();
@@ -437,7 +567,7 @@ async function addEvent() {
     <div className="app">
       <div className="layout">
         <aside className="sidebar stack">
-          <div className="brand"><div style={{ fontWeight: 700, fontSize: 18 }}>Seguimiento de Casos SM</div><small>Tablet + internet + sincronización</small></div>
+          <div className="brand"><div style={{ fontWeight: 700, fontSize: 18 }}>Seguimiento de Casos SM</div><small>Tablet + internet + sincronización + grabación</small></div>
           <button className={`nav-btn ${view === 'inicio' ? 'active' : ''}`} onClick={() => setView('inicio')}>Inicio</button>
           <button className={`nav-btn ${view === 'usuarios' ? 'active' : ''}`} onClick={() => setView('usuarios')}>Usuarios</button>
           <button className={`nav-btn ${view === 'agenda' ? 'active' : ''}`} onClick={() => setView('agenda')}>Agenda general</button>
@@ -630,6 +760,33 @@ async function addEvent() {
 
                   {tab === 'registrar' && (
                     <div className="stack">
+                      <div className="card stack" style={{ borderColor: '#c7d2fe' }}>
+                        <div className="top-row">
+                          <div>
+                            <h3 className="section-title">Grabación y transcripción de reunión</h3>
+                            <div className="subtle">Solicita consentimiento antes de grabar. La transcripción automática puede requerir corrección posterior.</div>
+                          </div>
+                          <div className="badge">{isRecording ? 'Grabando' : 'Disponible'}</div>
+                        </div>
+                        <div className="fields">
+                          <div className="field"><label>Título del registro</label><input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} /></div>
+                          <div className="field"><label>Participantes declarados</label><input value={meetingParticipants} onChange={(e) => setMeetingParticipants(e.target.value)} placeholder="Ej: Profesional, madre, docente" /></div>
+                        </div>
+                        <div className="footer-actions">
+                          {!isRecording ? <button className="primary inline" onClick={startMeetingRecording}>🎤 Iniciar grabación</button> : <button className="primary inline" onClick={stopMeetingRecording}>⏹️ Detener grabación</button>}
+                          <button className="secondary inline" onClick={saveTranscriptAsEvent} disabled={!liveTranscript.trim()}>Guardar transcripción como acción</button>
+                          <button className="ghost inline" onClick={clearTranscript}>Limpiar</button>
+                          {audioUrl && <a className="secondary inline" href={audioUrl} download={`grabacion-${Date.now()}.webm`}>Descargar audio</a>}
+                        </div>
+                        <div className="small muted">{recordingStatus || 'El audio queda disponible para descarga local. La transcripción guardada queda asociada al caso.'}</div>
+                        <textarea
+                          value={`${liveTranscript}${interimTranscript ? `
+${interimTranscript}` : ''}`}
+                          onChange={(e) => setLiveTranscript(e.target.value)}
+                          placeholder="Aquí aparecerá la transcripción automática en vivo. También puedes editarla antes de guardarla."
+                          style={{ minHeight: 180, border: '1px solid var(--line)', borderRadius: 16, padding: 12 }}
+                        />
+                      </div>
                       <div className="card stack">
                         <h3 className="section-title">Selecciona el módulo</h3>
                         <div className="module-grid">
