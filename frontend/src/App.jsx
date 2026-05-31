@@ -533,9 +533,7 @@ async function addEvent() {
       'Transcripción generada desde audio completo con separación automática de hablantes:',
       liveTranscript.trim(),
       'Nota: los hablantes automáticos deben revisarse y renombrarse manualmente si corresponde.'
-    ].join('
-
-');
+    ].join('\n\n');
     const item = {
       client_id: uid(),
       usuario_client_id: selectedCase.client_id,
